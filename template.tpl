@@ -39,7 +39,7 @@ ___TEMPLATE_PARAMETERS___
     "name": "siteId",
     "displayName": "Site ID",
     "simpleValueType": true,
-    "help": "Your FrostBanner site ID. Find it in the <strong>Install</strong> tab of the <a href=\"https://app.frostbanner.com/app/\">FrostBanner dashboard</a>. Style, texts and language are set in the dashboard.",
+    "help": "Your FrostBanner site ID. Find it in the \u003cstrong\u003eInstall\u003c/strong\u003e tab of the \u003ca href\u003d\"https://app.frostbanner.com/app/\"\u003eFrostBanner dashboard\u003c/a\u003e. Style, texts and language are set in the dashboard.",
     "valueHint": "my-site",
     "alwaysInSummary": true,
     "valueValidators": [
@@ -99,7 +99,7 @@ ___TEMPLATE_PARAMETERS___
         "displayName": "Wait for update (milliseconds)",
         "simpleValueType": true,
         "defaultValue": 500,
-        "help": "How long Google tags wait for the visitor's choice before they use the default state.",
+        "help": "How long Google tags wait for the visitor\u0027s choice before they use the default state.",
         "valueValidators": [
           {
             "type": "NON_NEGATIVE_NUMBER"
@@ -117,7 +117,7 @@ ___TEMPLATE_PARAMETERS___
       {
         "type": "CHECKBOX",
         "name": "restoreFromCookie",
-        "checkboxText": "Apply a returning visitor's saved choice immediately",
+        "checkboxText": "Apply a returning visitor\u0027s saved choice immediately",
         "simpleValueType": true,
         "defaultValue": true,
         "help": "Reads the fb_consent cookie, so Google tags get the saved choice before the banner script has loaded."
@@ -223,6 +223,7 @@ const choicesToState = (choices) => {
 };
 
 let lastApplied = '';
+let lastPushed = '';
 let restoredFromCookie = false;
 const dataLayerPush = data.pushEvent ? createQueue('dataLayer') : null;
 
@@ -232,7 +233,10 @@ const applyChoices = (choices, source) => {
   if (key === lastApplied) return;
   lastApplied = key;
   updateConsentState(state);
-  if (dataLayerPush) {
+  // 'pending' is a temporary fallback, not a visitor choice: no event for it,
+  // and no second event when the widget confirms the choice already pushed.
+  if (dataLayerPush && source !== 'pending' && key !== lastPushed) {
+    lastPushed = key;
     dataLayerPush({
       event: EVENT_NAME,
       frostbanner: {
@@ -302,23 +306,25 @@ if (!siteId) {
 
   const readWidgetConsent = () => {
     const choices = callInWindow('FrostBanner.getConsent');
-    if (getType(choices) === 'object') applyChoices(choices, 'banner');
+    if (getType(choices) === 'object') {
+      applyChoices(choices, 'banner');
+      return true;
+    }
+    return false;
   };
 
-  // 4. Listen to the widget before it loads, so no choice is missed.
-  callInWindow('addEventListener', 'frostbanner:change', readWidgetConsent);
-  callInWindow('addEventListener', 'frostbanner:shown', () => {
-    // The banner is shown only when there is no valid saved choice
-    // (for example, the categories changed). Take back what was restored.
-    if (restoredFromCookie) {
-      restoredFromCookie = false;
-      applyChoices({}, 'reset');
-    }
-  });
-
-  // 5. Load the widget.
+  // 4. Load the widget, then follow every choice the visitor makes.
   injectScript(SCRIPT_URL, () => {
-    readWidgetConsent();
+    if (!readWidgetConsent() && restoredFromCookie) {
+      // The widget has not confirmed the saved choice (yet). It may be
+      // out of date, for example when the site's categories changed, so
+      // fall back to denied until the widget confirms it or the visitor chooses.
+      applyChoices({}, 'pending');
+    }
+    restoredFromCookie = false;
+    callInWindow('FrostBanner.on', 'change', () => {
+      readWidgetConsent();
+    });
     data.gtmOnSuccess();
   }, () => {
     log('FrostBanner: could not load ' + SCRIPT_URL);
@@ -762,7 +768,7 @@ ___WEB_PERMISSIONS___
                 "mapValue": [
                   {
                     "type": 1,
-                    "string": "addEventListener"
+                    "string": "FrostBanner.on"
                   },
                   {
                     "type": 8,
@@ -912,6 +918,22 @@ scenarios:
     assertApi('setDefaultConsentState').wasCalled();
     assertApi('injectScript').wasNotCalled();
     assertApi('gtmOnFailure').wasCalled();
+- name: Falls back to denied when the widget does not confirm a restored choice
+  code: |-
+    mock('getCookieValues', (name) => {
+      if (name === 'fb_consent') return ['{"v":1,"c":{"necessary":true,"analytics":true}}'];
+      return [];
+    });
+    runCode({siteId: 'my-site', waitForUpdate: 500, restoreFromCookie: true, pushEvent: false});
+    assertApi('updateConsentState').wasCalledWith({
+      analytics_storage: 'granted', ad_storage: 'denied', ad_user_data: 'denied',
+      ad_personalization: 'denied', functionality_storage: 'denied', personalization_storage: 'denied'
+    });
+    assertApi('updateConsentState').wasCalledWith({
+      analytics_storage: 'denied', ad_storage: 'denied', ad_user_data: 'denied',
+      ad_personalization: 'denied', functionality_storage: 'denied', personalization_storage: 'denied'
+    });
+    assertApi('gtmOnSuccess').wasCalled();
 - name: Script load failure calls gtmOnFailure
   code: |-
     mock('injectScript', (url, onSuccess, onFailure) => { onFailure(); });
@@ -928,4 +950,5 @@ ___NOTES___
 
 FrostBanner – https://frostbanner.com
 Source: https://github.com/automatept-ai-pt/frostbanner-gtm-template
+
 

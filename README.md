@@ -48,7 +48,7 @@ Full guide: <https://frostbanner.com/guides/google-tag-manager/>
 | Accesses consent state (write) | Sets defaults and updates consent. |
 | Reads cookie `fb_consent` | Applies a returning visitor's saved choice. |
 | Injects `https://app.frostbanner.com/v1/fb.js` | Loads the banner. |
-| Accesses globals `frostBannerConfig`, `FrostBanner.getConsent`, `addEventListener`, `dataLayer` | Passes the Site ID to the widget, reads the visitor's choice, listens to widget events, pushes the optional event. |
+| Accesses globals `frostBannerConfig`, `FrostBanner.getConsent`, `FrostBanner.on`, `dataLayer` | Passes the Site ID to the widget, reads the visitor's choice, follows each new choice, pushes the optional event. |
 | Writes `ads_data_redaction`, `url_passthrough` | Optional Google settings. |
 | Logs to console (debug only) | Messages in Preview mode. |
 
