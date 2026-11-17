@@ -1,5 +1,5 @@
 homepage: "https://frostbanner.com"
 documentation: "https://frostbanner.com/guides/google-tag-manager/"
 versions:
-  - sha: COMMIT_SHA_OF_TEMPLATE_TPL
+  - sha: d1259e8e2c3a876e84e108fcf0391b2812c702f9
     changeNotes: Initial release.
