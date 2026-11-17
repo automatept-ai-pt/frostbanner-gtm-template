@@ -1,5 +1,5 @@
 homepage: "https://frostbanner.com"
 documentation: "https://frostbanner.com/guides/google-tag-manager/"
 versions:
-  - sha: d1259e8e2c3a876e84e108fcf0391b2812c702f9
+  - sha: 19fd39b8f187f3a35e82b99bac8d06766b5ee1b6
     changeNotes: Initial release.
