@@ -5,6 +5,7 @@ Template Gallery Developer Terms of Service available at
 https://developers.google.com/tag-manager/gallery-tos (or such other URL as
 Google may provide), as modified from time to time.
 
+
 ___INFO___
 
 {
@@ -927,3 +928,4 @@ ___NOTES___
 
 FrostBanner – https://frostbanner.com
 Source: https://github.com/automatept-ai-pt/frostbanner-gtm-template
+
