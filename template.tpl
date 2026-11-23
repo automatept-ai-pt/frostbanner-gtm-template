@@ -185,8 +185,6 @@ const setInWindow = require('setInWindow');
 const callInWindow = require('callInWindow');
 const gtagSet = require('gtagSet');
 const createQueue = require('createQueue');
-const createRegex = require('createRegex');
-const testRegex = require('testRegex');
 const getTimestampMillis = require('getTimestampMillis');
 const JSON = require('JSON');
 const getType = require('getType');
@@ -200,9 +198,18 @@ const COOKIE_NAME = 'fb_consent';
 const EVENT_NAME = 'frostbanner_consent_update';
 const DEFAULT_MAX_AGE_DAYS = 180;   // fb.js default maxAgeDays
 const DAY_MS = 86400000;
-// Same rule as the Site ID field validator, checked again in code because the
-// field can hold a variable whose value the editor does not validate.
-const SITE_ID_REGEX = createRegex('^[A-Za-z0-9_-]{1,64}$');
+// Same rule as the Site ID field validator (^[A-Za-z0-9_-]{1,64}$), checked
+// again in code because the field can hold a variable whose value the editor
+// does not validate. Web templates have no regex API, so it is done by hand.
+const SITE_ID_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-';
+const SITE_ID_MAX_LENGTH = 64;
+const isValidSiteId = (value) => {
+  if (value.length < 1 || value.length > SITE_ID_MAX_LENGTH) return false;
+  for (let i = 0; i < value.length; i++) {
+    if (SITE_ID_CHARS.indexOf(value.charAt(i)) === -1) return false;
+  }
+  return true;
+};
 
 // FrostBanner category -> Google consent types (same mapping as fb.js).
 const CATEGORY_TYPES = {
@@ -348,7 +355,7 @@ const onShown = () => {
 
 // 3. Site ID.
 const siteId = makeString(data.siteId || '').trim();
-if (!siteId || !SITE_ID_REGEX || !testRegex(SITE_ID_REGEX, siteId)) {
+if (!isValidSiteId(siteId)) {
   log('FrostBanner: the Site ID is empty or invalid (letters, numbers, "-" and "_" only). The banner was not loaded.');
   data.gtmOnFailure();
 } else {
@@ -1243,6 +1250,31 @@ scenarios:
     assertApi('setInWindow').wasNotCalled();
     assertApi('injectScript').wasNotCalled();
     assertApi('gtmOnFailure').wasCalled();
+- name: Accepts a 64-character site ID with every allowed character
+  code: |-
+    runCode({siteId: 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-', waitForUpdate: 500});
+    assertApi('injectScript').wasCalled();
+    assertApi('gtmOnFailure').wasNotCalled();
+- name: Rejects a 65-character site ID
+  code: |-
+    runCode({siteId: 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-x', waitForUpdate: 500});
+    assertApi('injectScript').wasNotCalled();
+    assertApi('gtmOnFailure').wasCalled();
+- name: Rejects a site ID with a space inside
+  code: |-
+    runCode({siteId: 'my site', waitForUpdate: 500});
+    assertApi('injectScript').wasNotCalled();
+    assertApi('gtmOnFailure').wasCalled();
+- name: Rejects a site ID with a non-ASCII letter
+  code: |-
+    runCode({siteId: 'sité', waitForUpdate: 500});
+    assertApi('injectScript').wasNotCalled();
+    assertApi('gtmOnFailure').wasCalled();
+- name: Trims spaces around a valid site ID
+  code: |-
+    runCode({siteId: '  my-site  ', waitForUpdate: 500});
+    assertApi('setInWindow').wasCalledWith('frostBannerConfig',
+      {site: 'my-site', gtm: true, endpoint: 'https://app.frostbanner.com/v1/consent'}, true);
 - name: Region rows replace the global default when a blank region row exists
   code: |-
     runCode({siteId: 'my-site', waitForUpdate: 300, defaultSettings: [
