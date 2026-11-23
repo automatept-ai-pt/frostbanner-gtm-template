@@ -16,8 +16,7 @@ ___INFO___
   "displayName": "FrostBanner – Cookie Consent Banner",
   "categories": [
     "UTILITY",
-    "TAG_MANAGEMENT",
-    "ANALYTICS"
+    "TAG_MANAGEMENT"
   ],
   "brand": {
     "id": "brand_dummy",
@@ -64,7 +63,7 @@ ___TEMPLATE_PARAMETERS___
       {
         "type": "LABEL",
         "name": "defaultsLabel",
-        "displayName": "If you leave the table empty, everything except security_storage is denied in all regions until the visitor chooses. Add a row without a region to change the default for all regions, or rows with ISO 3166-2 codes (for example US, US-CA) for specific regions."
+        "displayName": "If you leave the table empty, everything except security_storage is denied in all regions until the visitor chooses. Add a row without a region to change the default for all regions, or rows with ISO 3166-2 codes (for example US, US-CA) for specific regions. security_storage is always granted."
       },
       {
         "type": "SIMPLE_TABLE",
@@ -120,7 +119,7 @@ ___TEMPLATE_PARAMETERS___
         "checkboxText": "Apply a returning visitor\u0027s saved choice immediately",
         "simpleValueType": true,
         "defaultValue": true,
-        "help": "Reads the fb_consent cookie, so Google tags get the saved choice before the banner script has loaded."
+        "help": "Reads the fb_consent cookie, so Google tags get the saved choice before the banner script has loaded. If the banner asks the visitor again (for example after the site's categories changed), consent goes back to denied."
       },
       {
         "type": "CHECKBOX",
@@ -128,7 +127,7 @@ ___TEMPLATE_PARAMETERS___
         "checkboxText": "Push a frostbanner_consent_update event to the data layer",
         "simpleValueType": true,
         "defaultValue": true,
-        "help": "Use it as a Custom Event trigger for tags that should fire right after the visitor makes a choice. The data layer gets frostbanner.analytics, frostbanner.marketing and frostbanner.functional (true or false)."
+        "help": "Pushed each time the FrostBanner widget confirms a choice. Use it as a Custom Event trigger. The data layer gets frostbanner.analytics, frostbanner.marketing and frostbanner.functional (true or false) and frostbanner.source: restore (saved choice confirmed), accept_all, reject_all, custom (banner) or outside_region."
       },
       {
         "type": "CHECKBOX",
@@ -153,7 +152,9 @@ ___SANDBOXED_JS_FOR_WEB_TEMPLATE___
 
 // FrostBanner – Cookie Consent for Google Tag Manager
 // Sets Google Consent Mode v2 defaults, restores a saved choice, loads the
-// FrostBanner widget and passes every visitor choice to Tag Manager.
+// FrostBanner widget and passes every choice the widget confirms to Tag Manager.
+// The widget runs in GTM mode (frostBannerConfig.gtm = true): it sends no
+// gtag('consent', ...) commands itself, only this template talks to Google.
 
 const setDefaultConsentState = require('setDefaultConsentState');
 const updateConsentState = require('updateConsentState');
@@ -164,6 +165,8 @@ const setInWindow = require('setInWindow');
 const callInWindow = require('callInWindow');
 const gtagSet = require('gtagSet');
 const createQueue = require('createQueue');
+const createRegex = require('createRegex');
+const testRegex = require('testRegex');
 const JSON = require('JSON');
 const getType = require('getType');
 const makeNumber = require('makeNumber');
@@ -174,6 +177,9 @@ const SCRIPT_URL = 'https://app.frostbanner.com/v1/fb.js';
 const CONSENT_ENDPOINT = 'https://app.frostbanner.com/v1/consent';
 const COOKIE_NAME = 'fb_consent';
 const EVENT_NAME = 'frostbanner_consent_update';
+// Same rule as the Site ID field validator, checked again in code because the
+// field can hold a variable whose value the editor does not validate.
+const SITE_ID_REGEX = createRegex('^[A-Za-z0-9_-]{1,64}$');
 
 // FrostBanner category -> Google consent types (same mapping as fb.js).
 const CATEGORY_TYPES = {
@@ -205,16 +211,19 @@ const parseRow = (row) => {
     else log('FrostBanner: unknown consent type ignored:', type);
   });
   splitInput(row.denied).forEach((type) => {
-    if (isKnownType(type)) command[type] = 'denied';
+    if (type === 'security_storage') log('FrostBanner: security_storage is always granted, "denied" ignored.');
+    else if (isKnownType(type)) command[type] = 'denied';
     else log('FrostBanner: unknown consent type ignored:', type);
   });
+  // Strictly necessary storage is always granted, as in fb.js.
+  command.security_storage = 'granted';
   return command;
 };
 
 const choicesToState = (choices) => {
   const state = {};
   CATEGORIES.forEach((category) => {
-    const granted = !!choices && choices[category] === true;
+    const granted = getType(choices) === 'object' && choices[category] === true;
     CATEGORY_TYPES[category].forEach((type) => {
       state[type] = granted ? 'granted' : 'denied';
     });
@@ -222,31 +231,33 @@ const choicesToState = (choices) => {
   return state;
 };
 
-let lastApplied = '';
-let lastPushed = '';
-let restoredFromCookie = false;
+// State last sent with updateConsentState ('' = no update sent yet).
+let applied = '';
 const dataLayerPush = data.pushEvent ? createQueue('dataLayer') : null;
 
-const applyChoices = (choices, source) => {
+const applyState = (choices) => {
   const state = choicesToState(choices);
   const key = JSON.stringify(state);
-  if (key === lastApplied) return;
-  lastApplied = key;
-  updateConsentState(state);
-  // 'pending' is a temporary fallback, not a visitor choice: no event for it,
-  // and no second event when the widget confirms the choice already pushed.
-  if (dataLayerPush && source !== 'pending' && key !== lastPushed) {
-    lastPushed = key;
-    dataLayerPush({
-      event: EVENT_NAME,
-      frostbanner: {
-        analytics: state.analytics_storage === 'granted',
-        marketing: state.ad_storage === 'granted',
-        functional: state.functionality_storage === 'granted',
-        source: source
-      }
-    });
+  if (key !== applied) {
+    applied = key;
+    updateConsentState(state);
   }
+  return state;
+};
+
+// A choice confirmed by fb.js: update Google, then tell the data layer.
+const applyConfirmed = (choices, source) => {
+  const state = applyState(choices);
+  if (!dataLayerPush) return;
+  dataLayerPush({
+    event: EVENT_NAME,
+    frostbanner: {
+      analytics: state.analytics_storage === 'granted',
+      marketing: state.ad_storage === 'granted',
+      functional: state.functionality_storage === 'granted',
+      source: source
+    }
+  });
 };
 
 // 1. Default consent state. Must run first and synchronously.
@@ -280,51 +291,66 @@ rows.forEach((row) => {
 if (data.adsDataRedaction) gtagSet('ads_data_redaction', true);
 if (data.urlPassthrough) gtagSet('url_passthrough', true);
 
-// 2. Returning visitor: apply the saved choice right away.
+// 2. Returning visitor: apply the saved choice right away, so Google tags get
+// it before the widget has loaded. Not a confirmed choice yet: no data layer
+// event. The widget confirms it ('change', source 'restore') or asks again
+// ('shown'), and then consent goes back to denied.
 if (data.restoreFromCookie !== false) {
   const values = getCookieValues(COOKIE_NAME);
   if (values && values.length > 0) {
     const saved = JSON.parse(values[0]);
-    if (saved && getType(saved.c) === 'object') {
-      applyChoices(saved.c, 'saved');
-      restoredFromCookie = true;
-    }
+    if (saved && getType(saved.c) === 'object') applyState(saved.c);
   }
 }
 
+// The banner asks the visitor (again). A saved or earlier choice that was sent
+// to Google no longer holds: back to denied. Nothing was sent yet: the
+// defaults (including region defaults) stay as they are.
+const onShown = () => {
+  if (applied) applyState({});
+};
+
 // 3. Site ID.
 const siteId = makeString(data.siteId || '').trim();
-if (!siteId) {
-  log('FrostBanner: Site ID is empty. The banner was not loaded.');
+if (!siteId || !SITE_ID_REGEX || !testRegex(SITE_ID_REGEX, siteId)) {
+  log('FrostBanner: the Site ID is empty or invalid (letters, numbers, "-" and "_" only). The banner was not loaded.');
   data.gtmOnFailure();
 } else {
   let config = copyFromWindow('frostBannerConfig');
   if (getType(config) !== 'object') config = {};
   config.site = siteId;
+  config.gtm = true;
   if (!config.endpoint) config.endpoint = CONSENT_ENDPOINT;
   setInWindow('frostBannerConfig', config, true);
 
-  const readWidgetConsent = () => {
-    const choices = callInWindow('FrostBanner.getConsent');
-    if (getType(choices) === 'object') {
-      applyChoices(choices, 'banner');
-      return true;
-    }
-    return false;
-  };
-
-  // 4. Load the widget, then follow every choice the visitor makes.
+  // 4. Load the widget, then follow what it reports.
   injectScript(SCRIPT_URL, () => {
-    if (!readWidgetConsent() && restoredFromCookie) {
-      // The widget has not confirmed the saved choice (yet). It may be
-      // out of date, for example when the site's categories changed, so
-      // fall back to denied until the widget confirms it or the visitor chooses.
-      applyChoices({}, 'pending');
-    }
-    restoredFromCookie = false;
-    callInWindow('FrostBanner.on', 'change', () => {
-      readWidgetConsent();
+    // change: { choices, source } - a choice applied by the widget
+    // (restore, outside_region, accept_all, reject_all, custom).
+    callInWindow('FrostBanner.on', 'change', (event) => {
+      if (getType(event) !== 'object' || getType(event.choices) !== 'object') return;
+      const source = getType(event.source) === 'string' ? event.source : 'unknown';
+      applyConfirmed(event.choices, source);
     });
+    // shown: the banner asks the visitor.
+    callInWindow('FrostBanner.on', 'shown', onShown);
+    // The widget may have started while its script ran (cached settings, page
+    // already parsed), before these handlers existed. Its status says what
+    // happened: 'pending' (not started: shown/change will follow), 'shown'
+    // (banner on screen, no choice) or 'decided' (getConsent() and getSource()
+    // return the applied choice and its source).
+    const status = callInWindow('FrostBanner.getStatus');
+    if (status === 'decided') {
+      const current = callInWindow('FrostBanner.getConsent');
+      const source = callInWindow('FrostBanner.getSource');
+      if (getType(current) === 'object') {
+        applyConfirmed(current, getType(source) === 'string' ? source : 'unknown');
+      }
+    } else if (status === 'shown') {
+      onShown();
+    } else if (status !== 'pending') {
+      log('FrostBanner: FrostBanner.getStatus() is not available, waiting for widget events.');
+    }
     data.gtmOnSuccess();
   }, () => {
     log('FrostBanner: could not load ' + SCRIPT_URL);
@@ -807,6 +833,84 @@ ___WEB_PERMISSIONS___
                 "mapValue": [
                   {
                     "type": 1,
+                    "string": "FrostBanner.getStatus"
+                  },
+                  {
+                    "type": 8,
+                    "boolean": false
+                  },
+                  {
+                    "type": 8,
+                    "boolean": false
+                  },
+                  {
+                    "type": 8,
+                    "boolean": true
+                  }
+                ]
+              },
+              {
+                "type": 3,
+                "mapKey": [
+                  {
+                    "type": 1,
+                    "string": "key"
+                  },
+                  {
+                    "type": 1,
+                    "string": "read"
+                  },
+                  {
+                    "type": 1,
+                    "string": "write"
+                  },
+                  {
+                    "type": 1,
+                    "string": "execute"
+                  }
+                ],
+                "mapValue": [
+                  {
+                    "type": 1,
+                    "string": "FrostBanner.getSource"
+                  },
+                  {
+                    "type": 8,
+                    "boolean": false
+                  },
+                  {
+                    "type": 8,
+                    "boolean": false
+                  },
+                  {
+                    "type": 8,
+                    "boolean": true
+                  }
+                ]
+              },
+              {
+                "type": 3,
+                "mapKey": [
+                  {
+                    "type": 1,
+                    "string": "key"
+                  },
+                  {
+                    "type": 1,
+                    "string": "read"
+                  },
+                  {
+                    "type": 1,
+                    "string": "write"
+                  },
+                  {
+                    "type": 1,
+                    "string": "execute"
+                  }
+                ],
+                "mapValue": [
+                  {
+                    "type": 1,
                     "string": "dataLayer"
                   },
                   {
@@ -819,7 +923,7 @@ ___WEB_PERMISSIONS___
                   },
                   {
                     "type": 8,
-                    "boolean": true
+                    "boolean": false
                   }
                 ]
               }
@@ -869,7 +973,7 @@ ___WEB_PERMISSIONS___
 ___TESTS___
 
 scenarios:
-- name: Sets all-denied default and loads the widget
+- name: Sets all-denied default, GTM mode and loads the widget
   code: |-
     runCode({siteId: 'my-site', waitForUpdate: 500, restoreFromCookie: true, pushEvent: true});
     assertApi('setDefaultConsentState').wasCalledWith({
@@ -878,32 +982,165 @@ scenarios:
       personalization_storage: 'denied', security_storage: 'granted', wait_for_update: 500
     });
     assertApi('setInWindow').wasCalledWith('frostBannerConfig',
-      {site: 'my-site', endpoint: 'https://app.frostbanner.com/v1/consent'}, true);
+      {site: 'my-site', gtm: true, endpoint: 'https://app.frostbanner.com/v1/consent'}, true);
     assertApi('injectScript').wasCalled();
     assertApi('updateConsentState').wasNotCalled();
+    assertThat(pushed.length).isEqualTo(0);
+    assertThat(getType(handlers.change)).isEqualTo('function');
+    assertThat(getType(handlers.shown)).isEqualTo('function');
     assertApi('gtmOnSuccess').wasCalled();
-- name: Restores a saved choice from the fb_consent cookie
+- name: Keeps an existing frostBannerConfig and forces gtm true
   code: |-
-    mock('getCookieValues', (name) => {
-      if (name === 'fb_consent') return ['{"v":1,"k":"analytics,marketing,necessary","id":"x","ts":1,"c":{"necessary":true,"analytics":true,"marketing":false}}'];
-      return [];
+    mock('copyFromWindow', (key) => {
+      if (key === 'frostBannerConfig') return {lang: 'pt', gtm: false, endpoint: 'https://example.com/log'};
     });
-    runCode({siteId: 'my-site', waitForUpdate: 500, restoreFromCookie: true, pushEvent: false});
-    assertApi('updateConsentState').wasCalledWith({
-      analytics_storage: 'granted', ad_storage: 'denied', ad_user_data: 'denied',
-      ad_personalization: 'denied', functionality_storage: 'denied', personalization_storage: 'denied'
-    });
-- name: Applies the choice reported by the widget after it loads
+    runCode({siteId: 'my-site', waitForUpdate: 500});
+    assertApi('setInWindow').wasCalledWith('frostBannerConfig',
+      {lang: 'pt', gtm: true, site: 'my-site', endpoint: 'https://example.com/log'}, true);
+- name: Restores a saved choice from the cookie without a data layer event
   code: |-
-    mock('callInWindow', (path) => {
-      if (path === 'FrostBanner.getConsent') return {necessary: true, analytics: true, marketing: true, functional: true};
-    });
+    mock('getCookieValues', (name) => name === 'fb_consent' ? [SAVED_COOKIE] : []);
     runCode({siteId: 'my-site', waitForUpdate: 500, restoreFromCookie: true, pushEvent: true});
-    assertApi('updateConsentState').wasCalledWith({
-      analytics_storage: 'granted', ad_storage: 'granted', ad_user_data: 'granted',
-      ad_personalization: 'granted', functionality_storage: 'granted', personalization_storage: 'granted'
-    });
+    assertApi('updateConsentState').wasCalledWith(SAVED_STATE);
+    assertThat(pushed.length).isEqualTo(0);
+- name: Cookie restore can be switched off
+  code: |-
+    mock('getCookieValues', (name) => name === 'fb_consent' ? [SAVED_COOKIE] : []);
+    runCode({siteId: 'my-site', waitForUpdate: 500, restoreFromCookie: false, pushEvent: true});
+    assertApi('getCookieValues').wasNotCalled();
+    assertApi('updateConsentState').wasNotCalled();
+- name: change with source restore confirms the saved choice and pushes the event
+  code: |-
+    const updates = [];
+    mock('updateConsentState', (state) => { updates.push(state); });
+    mock('getCookieValues', (name) => name === 'fb_consent' ? [SAVED_COOKIE] : []);
+    runCode({siteId: 'my-site', waitForUpdate: 500, restoreFromCookie: true, pushEvent: true});
+    handlers.change({choices: {necessary: true, analytics: true, marketing: false}, source: 'restore'});
+    assertThat(updates.length).isEqualTo(1);
+    assertThat(updates[0]).isEqualTo(SAVED_STATE);
+    assertThat(pushed.length).isEqualTo(1);
+    assertThat(pushed[0]).isEqualTo({event: 'frostbanner_consent_update',
+      frostbanner: {analytics: true, marketing: false, functional: false, source: 'restore'}});
+- name: change from the banner updates consent and pushes its source
+  code: |-
+    runCode({siteId: 'my-site', waitForUpdate: 500, restoreFromCookie: true, pushEvent: true});
+    handlers.change({choices: {necessary: true, analytics: true, marketing: true, functional: true}, source: 'accept_all'});
+    assertApi('updateConsentState').wasCalledWith(ALL_GRANTED);
+    assertThat(pushed.length).isEqualTo(1);
+    assertThat(pushed[0]).isEqualTo({event: 'frostbanner_consent_update',
+      frostbanner: {analytics: true, marketing: true, functional: true, source: 'accept_all'}});
+    handlers.change({choices: {necessary: true, analytics: false, marketing: false, functional: false}, source: 'reject_all'});
+    assertApi('updateConsentState').wasCalledWith(ALL_DENIED);
+    assertThat(pushed.length).isEqualTo(2);
+    assertThat(pushed[1].frostbanner.source).isEqualTo('reject_all');
+- name: No data layer event when pushEvent is off
+  code: |-
+    runCode({siteId: 'my-site', waitForUpdate: 500, pushEvent: false});
+    handlers.change({choices: {necessary: true, analytics: true}, source: 'custom'});
+    assertApi('createQueue').wasNotCalled();
+    assertApi('updateConsentState').wasCalled();
+- name: shown after a restored choice goes back to denied without an event
+  code: |-
+    mock('getCookieValues', (name) => name === 'fb_consent' ? [SAVED_COOKIE] : []);
+    runCode({siteId: 'my-site', waitForUpdate: 500, restoreFromCookie: true, pushEvent: true});
+    assertApi('updateConsentState').wasNotCalledWith(ALL_DENIED);
+    handlers.shown({layout: 'corner'});
+    assertApi('updateConsentState').wasCalledWith(SAVED_STATE);
+    assertApi('updateConsentState').wasCalledWith(ALL_DENIED);
+    assertThat(pushed.length).isEqualTo(0);
+- name: shown for a new visitor keeps the defaults
+  code: |-
+    runCode({siteId: 'my-site', waitForUpdate: 500, restoreFromCookie: true, pushEvent: true});
+    handlers.shown({layout: 'corner'});
+    assertApi('updateConsentState').wasNotCalled();
+    assertThat(pushed.length).isEqualTo(0);
+- name: Status pending at script load keeps the restored choice and waits for events
+  code: |-
+    mock('getCookieValues', (name) => name === 'fb_consent' ? [SAVED_COOKIE] : []);
+    widgetStatus = 'pending';
+    runCode({siteId: 'my-site', waitForUpdate: 500, restoreFromCookie: true, pushEvent: true});
+    assertApi('updateConsentState').wasCalledWith(SAVED_STATE);
+    assertApi('updateConsentState').wasNotCalledWith(ALL_DENIED);
+    assertThat(pushed.length).isEqualTo(0);
+    assertApi('callInWindow').wasNotCalledWith('FrostBanner.getConsent');
     assertApi('gtmOnSuccess').wasCalled();
+- name: Status shown at script load reverts a restored choice to denied
+  code: |-
+    mock('getCookieValues', (name) => name === 'fb_consent' ? [SAVED_COOKIE] : []);
+    widgetStatus = 'shown';
+    runCode({siteId: 'my-site', waitForUpdate: 500, restoreFromCookie: true, pushEvent: true});
+    assertApi('updateConsentState').wasCalledWith(SAVED_STATE);
+    assertApi('updateConsentState').wasCalledWith(ALL_DENIED);
+    assertThat(pushed.length).isEqualTo(0);
+- name: Status shown at script load keeps the defaults for a new visitor
+  code: |-
+    widgetStatus = 'shown';
+    runCode({siteId: 'my-site', waitForUpdate: 500, restoreFromCookie: true, pushEvent: true});
+    assertApi('updateConsentState').wasNotCalled();
+    assertThat(pushed.length).isEqualTo(0);
+- name: Status decided at script load applies getConsent with the getSource source
+  code: |-
+    mock('getCookieValues', (name) => name === 'fb_consent' ? [SAVED_COOKIE] : []);
+    widgetStatus = 'decided';
+    widgetConsent = {necessary: true, analytics: true, marketing: false};
+    widgetSource = 'restore';
+    runCode({siteId: 'my-site', waitForUpdate: 500, restoreFromCookie: true, pushEvent: true});
+    assertApi('updateConsentState').wasCalledWith(SAVED_STATE);
+    assertThat(pushed.length).isEqualTo(1);
+    assertThat(pushed[0]).isEqualTo({event: 'frostbanner_consent_update',
+      frostbanner: {analytics: true, marketing: false, functional: false, source: 'restore'}});
+- name: Status decided uses getSource even when cookie restore is off
+  code: |-
+    widgetStatus = 'decided';
+    widgetConsent = {necessary: true, analytics: true, marketing: true, functional: true};
+    widgetSource = 'outside_region';
+    runCode({siteId: 'my-site', waitForUpdate: 500, restoreFromCookie: false, pushEvent: true});
+    assertApi('getCookieValues').wasNotCalled();
+    assertApi('updateConsentState').wasCalledWith(ALL_GRANTED);
+    assertThat(pushed.length).isEqualTo(1);
+    assertThat(pushed[0].frostbanner.source).isEqualTo('outside_region');
+- name: Status decided with a non-string source pushes source unknown
+  code: |-
+    widgetStatus = 'decided';
+    widgetConsent = {necessary: true, analytics: false, marketing: false, functional: false};
+    widgetSource = null;
+    runCode({siteId: 'my-site', waitForUpdate: 500, restoreFromCookie: true, pushEvent: true});
+    assertApi('updateConsentState').wasCalledWith(ALL_DENIED);
+    assertThat(pushed.length).isEqualTo(1);
+    assertThat(pushed[0].frostbanner.source).isEqualTo('unknown');
+- name: Without getStatus (older widget) nothing changes at script load
+  code: |-
+    mock('getCookieValues', (name) => name === 'fb_consent' ? [SAVED_COOKIE] : []);
+    widgetStatus = undefined;
+    widgetConsent = {necessary: true, analytics: false};
+    runCode({siteId: 'my-site', waitForUpdate: 500, restoreFromCookie: true, pushEvent: true});
+    assertApi('updateConsentState').wasNotCalledWith(ALL_DENIED);
+    assertThat(pushed.length).isEqualTo(0);
+    assertApi('gtmOnSuccess').wasCalled();
+- name: Widget unavailable - gtmOnFailure, no event
+  code: |-
+    mock('injectScript', (url, onSuccess, onFailure) => { onFailure(); });
+    mock('getCookieValues', (name) => name === 'fb_consent' ? [SAVED_COOKIE] : []);
+    runCode({siteId: 'my-site', waitForUpdate: 500, restoreFromCookie: true, pushEvent: true});
+    assertApi('setDefaultConsentState').wasCalled();
+    assertApi('updateConsentState').wasCalledWith(SAVED_STATE);
+    assertApi('callInWindow').wasNotCalled();
+    assertThat(pushed.length).isEqualTo(0);
+    assertApi('gtmOnSuccess').wasNotCalled();
+    assertApi('gtmOnFailure').wasCalled();
+- name: Fails without a site ID but still sets the default
+  code: |-
+    runCode({siteId: '', waitForUpdate: 500});
+    assertApi('setDefaultConsentState').wasCalled();
+    assertApi('injectScript').wasNotCalled();
+    assertApi('gtmOnFailure').wasCalled();
+- name: Rejects an invalid site ID coming from a variable
+  code: |-
+    runCode({siteId: 'my-site"><img src=x>', waitForUpdate: 500});
+    assertApi('setDefaultConsentState').wasCalled();
+    assertApi('setInWindow').wasNotCalled();
+    assertApi('injectScript').wasNotCalled();
+    assertApi('gtmOnFailure').wasCalled();
 - name: Region rows replace the global default when a blank region row exists
   code: |-
     runCode({siteId: 'my-site', waitForUpdate: 300, defaultSettings: [
@@ -912,38 +1149,43 @@ scenarios:
     ]});
     assertApi('setDefaultConsentState').wasCalledWith({security_storage: 'granted', analytics_storage: 'granted', ad_storage: 'denied', wait_for_update: 300});
     assertApi('setDefaultConsentState').wasCalledWith({region: ['PT', 'ES'], security_storage: 'granted', analytics_storage: 'denied', ad_storage: 'denied', wait_for_update: 300});
-- name: Fails without a site ID but still sets the default
+- name: security_storage is always granted in region rows
   code: |-
-    runCode({siteId: '', waitForUpdate: 500});
-    assertApi('setDefaultConsentState').wasCalled();
-    assertApi('injectScript').wasNotCalled();
-    assertApi('gtmOnFailure').wasCalled();
-- name: Falls back to denied when the widget does not confirm a restored choice
-  code: |-
-    mock('getCookieValues', (name) => {
-      if (name === 'fb_consent') return ['{"v":1,"c":{"necessary":true,"analytics":true}}'];
-      return [];
-    });
-    runCode({siteId: 'my-site', waitForUpdate: 500, restoreFromCookie: true, pushEvent: false});
-    assertApi('updateConsentState').wasCalledWith({
-      analytics_storage: 'granted', ad_storage: 'denied', ad_user_data: 'denied',
-      ad_personalization: 'denied', functionality_storage: 'denied', personalization_storage: 'denied'
-    });
-    assertApi('updateConsentState').wasCalledWith({
-      analytics_storage: 'denied', ad_storage: 'denied', ad_user_data: 'denied',
-      ad_personalization: 'denied', functionality_storage: 'denied', personalization_storage: 'denied'
-    });
-    assertApi('gtmOnSuccess').wasCalled();
-- name: Script load failure calls gtmOnFailure
-  code: |-
-    mock('injectScript', (url, onSuccess, onFailure) => { onFailure(); });
-    runCode({siteId: 'my-site', waitForUpdate: 500});
-    assertApi('gtmOnFailure').wasCalled();
+    runCode({siteId: 'my-site', waitForUpdate: 500, defaultSettings: [
+      {region: 'US', granted: 'analytics_storage', denied: 'security_storage,ad_storage'}
+    ]});
+    assertApi('setDefaultConsentState').wasCalledWith({region: ['US'], analytics_storage: 'granted', ad_storage: 'denied', security_storage: 'granted', wait_for_update: 500});
+    assertApi('setDefaultConsentState').wasNotCalledWith({region: ['US'], analytics_storage: 'granted', ad_storage: 'denied', security_storage: 'denied', wait_for_update: 500});
 setup: |-
+  const getType = require('getType');
+  const SAVED_COOKIE = '{"v":1,"k":"analytics,marketing,necessary","id":"x","ts":1,"c":{"necessary":true,"analytics":true,"marketing":false}}';
+  const SAVED_STATE = {
+    analytics_storage: 'granted', ad_storage: 'denied', ad_user_data: 'denied',
+    ad_personalization: 'denied', functionality_storage: 'denied', personalization_storage: 'denied'
+  };
+  const ALL_DENIED = {
+    analytics_storage: 'denied', ad_storage: 'denied', ad_user_data: 'denied',
+    ad_personalization: 'denied', functionality_storage: 'denied', personalization_storage: 'denied'
+  };
+  const ALL_GRANTED = {
+    analytics_storage: 'granted', ad_storage: 'granted', ad_user_data: 'granted',
+    ad_personalization: 'granted', functionality_storage: 'granted', personalization_storage: 'granted'
+  };
+  const handlers = {};
+  const pushed = [];
+  let widgetStatus = 'pending';
+  let widgetConsent = null;
+  let widgetSource = null;
   mock('injectScript', (url, onSuccess, onFailure) => { onSuccess(); });
   mock('getCookieValues', () => []);
   mock('copyFromWindow', () => undefined);
-  mock('callInWindow', () => undefined);
+  mock('callInWindow', (path, eventName, fn) => {
+    if (path === 'FrostBanner.on') { handlers[eventName] = fn; return; }
+    if (path === 'FrostBanner.getStatus') return widgetStatus;
+    if (path === 'FrostBanner.getConsent') return widgetConsent;
+    if (path === 'FrostBanner.getSource') return widgetSource;
+  });
+  mock('createQueue', (name) => (obj) => { pushed.push(obj); });
 
 
 ___NOTES___
