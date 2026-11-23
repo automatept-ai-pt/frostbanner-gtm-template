@@ -122,6 +122,26 @@ ___TEMPLATE_PARAMETERS___
         "help": "Reads the fb_consent cookie, so Google tags get the saved choice before the banner script has loaded. If the banner asks the visitor again (for example after the site's categories changed), consent goes back to denied."
       },
       {
+        "type": "TEXT",
+        "name": "consentMaxAgeDays",
+        "displayName": "Consent lifetime, days",
+        "simpleValueType": true,
+        "defaultValue": 180,
+        "help": "A saved choice older than this is not applied. Use the same value as the consent lifetime (maxAgeDays) in your FrostBanner settings. Default 180.",
+        "valueValidators": [
+          {
+            "type": "POSITIVE_NUMBER"
+          }
+        ],
+        "enablingConditions": [
+          {
+            "paramName": "restoreFromCookie",
+            "paramValue": true,
+            "type": "EQUALS"
+          }
+        ]
+      },
+      {
         "type": "CHECKBOX",
         "name": "pushEvent",
         "checkboxText": "Push a frostbanner_consent_update event to the data layer",
@@ -167,6 +187,7 @@ const gtagSet = require('gtagSet');
 const createQueue = require('createQueue');
 const createRegex = require('createRegex');
 const testRegex = require('testRegex');
+const getTimestampMillis = require('getTimestampMillis');
 const JSON = require('JSON');
 const getType = require('getType');
 const makeNumber = require('makeNumber');
@@ -177,6 +198,8 @@ const SCRIPT_URL = 'https://app.frostbanner.com/v1/fb.js';
 const CONSENT_ENDPOINT = 'https://app.frostbanner.com/v1/consent';
 const COOKIE_NAME = 'fb_consent';
 const EVENT_NAME = 'frostbanner_consent_update';
+const DEFAULT_MAX_AGE_DAYS = 180;   // fb.js default maxAgeDays
+const DAY_MS = 86400000;
 // Same rule as the Site ID field validator, checked again in code because the
 // field can hold a variable whose value the editor does not validate.
 const SITE_ID_REGEX = createRegex('^[A-Za-z0-9_-]{1,64}$');
@@ -295,11 +318,24 @@ if (data.urlPassthrough) gtagSet('url_passthrough', true);
 // it before the widget has loaded. Not a confirmed choice yet: no data layer
 // event. The widget confirms it ('change', source 'restore') or asks again
 // ('shown'), and then consent goes back to denied.
+// A record older than the consent lifetime (field ts, milliseconds) is not
+// applied, same check as fb.js. Changed categories and consentVersion are
+// left to the widget: it asks again ('shown') and consent goes back to denied.
+let maxAgeDays = makeNumber(data.consentMaxAgeDays);
+if (!(maxAgeDays > 0 && maxAgeDays < 100000)) maxAgeDays = DEFAULT_MAX_AGE_DAYS;
+const isFresh = (saved) => {
+  if (getType(saved.ts) !== 'number') return false;
+  const age = getTimestampMillis() - saved.ts;
+  return age >= -DAY_MS && age <= maxAgeDays * DAY_MS;
+};
 if (data.restoreFromCookie !== false) {
   const values = getCookieValues(COOKIE_NAME);
   if (values && values.length > 0) {
     const saved = JSON.parse(values[0]);
-    if (saved && getType(saved.c) === 'object') applyState(saved.c);
+    if (saved && getType(saved.c) === 'object') {
+      if (isFresh(saved)) applyState(saved.c);
+      else log('FrostBanner: the saved choice is older than ' + maxAgeDays + ' days, dated in the future or has no date, not applied.');
+    }
   }
 }
 
@@ -349,7 +385,10 @@ if (!siteId || !SITE_ID_REGEX || !testRegex(SITE_ID_REGEX, siteId)) {
     } else if (status === 'shown') {
       onShown();
     } else if (status !== 'pending') {
-      log('FrostBanner: FrostBanner.getStatus() is not available, waiting for widget events.');
+      // Older widget without getStatus(): it may already have shown the
+      // banner unseen, so a choice applied from the cookie is not trusted.
+      log('FrostBanner: FrostBanner.getStatus() is not available, consent goes back to denied until the widget reports a choice.');
+      onShown();
     }
     data.gtmOnSuccess();
   }, () => {
@@ -1108,15 +1147,78 @@ scenarios:
     assertApi('updateConsentState').wasCalledWith(ALL_DENIED);
     assertThat(pushed.length).isEqualTo(1);
     assertThat(pushed[0].frostbanner.source).isEqualTo('unknown');
-- name: Without getStatus (older widget) nothing changes at script load
+- name: Without getStatus (older widget) a restored choice goes back to denied
   code: |-
     mock('getCookieValues', (name) => name === 'fb_consent' ? [SAVED_COOKIE] : []);
     widgetStatus = undefined;
-    widgetConsent = {necessary: true, analytics: false};
+    widgetConsent = {necessary: true, analytics: true, marketing: false};
     runCode({siteId: 'my-site', waitForUpdate: 500, restoreFromCookie: true, pushEvent: true});
-    assertApi('updateConsentState').wasNotCalledWith(ALL_DENIED);
+    assertApi('updateConsentState').wasCalledWith(SAVED_STATE);
+    assertApi('updateConsentState').wasCalledWith(ALL_DENIED);
     assertThat(pushed.length).isEqualTo(0);
     assertApi('gtmOnSuccess').wasCalled();
+- name: Without getStatus and without a restored choice the defaults stay
+  code: |-
+    widgetStatus = undefined;
+    runCode({siteId: 'my-site', waitForUpdate: 500, restoreFromCookie: true, pushEvent: true});
+    assertApi('updateConsentState').wasNotCalled();
+    assertThat(pushed.length).isEqualTo(0);
+- name: Without getStatus a later change event still applies the choice
+  code: |-
+    mock('getCookieValues', (name) => name === 'fb_consent' ? [SAVED_COOKIE] : []);
+    widgetStatus = undefined;
+    runCode({siteId: 'my-site', waitForUpdate: 500, restoreFromCookie: true, pushEvent: true});
+    handlers.change({choices: {necessary: true, analytics: true, marketing: false}, source: 'restore'});
+    assertThat(pushed.length).isEqualTo(1);
+    assertThat(pushed[0].frostbanner.source).isEqualTo('restore');
+    assertThat(pushed[0].frostbanner.analytics).isEqualTo(true);
+- name: A saved choice older than the default 180 days is not applied
+  code: |-
+    mock('getCookieValues', (name) => name === 'fb_consent' ? [cookieAt(NOW - 181 * DAY)] : []);
+    runCode({siteId: 'my-site', waitForUpdate: 500, restoreFromCookie: true, pushEvent: true});
+    assertApi('updateConsentState').wasNotCalled();
+- name: A saved choice within the default 180 days is applied
+  code: |-
+    mock('getCookieValues', (name) => name === 'fb_consent' ? [cookieAt(NOW - 179 * DAY)] : []);
+    runCode({siteId: 'my-site', waitForUpdate: 500, restoreFromCookie: true, pushEvent: true});
+    assertApi('updateConsentState').wasCalledWith(SAVED_STATE);
+- name: Consent lifetime field is used for the age check
+  code: |-
+    mock('getCookieValues', (name) => name === 'fb_consent' ? [cookieAt(NOW - 40 * DAY)] : []);
+    runCode({siteId: 'my-site', waitForUpdate: 500, restoreFromCookie: true, consentMaxAgeDays: 30});
+    assertApi('updateConsentState').wasNotCalled();
+- name: An invalid consent lifetime falls back to 180 days
+  code: |-
+    mock('getCookieValues', (name) => name === 'fb_consent' ? [cookieAt(NOW - 100 * DAY)] : []);
+    runCode({siteId: 'my-site', waitForUpdate: 500, restoreFromCookie: true, consentMaxAgeDays: 'abc'});
+    assertApi('updateConsentState').wasCalledWith(SAVED_STATE);
+- name: A saved choice without a date is not applied
+  code: |-
+    mock('getCookieValues', (name) => name === 'fb_consent' ? ['{"v":1,"c":{"necessary":true,"analytics":true}}'] : []);
+    runCode({siteId: 'my-site', waitForUpdate: 500, restoreFromCookie: true});
+    assertApi('updateConsentState').wasNotCalled();
+- name: A saved choice dated more than a day in the future is not applied
+  code: |-
+    mock('getCookieValues', (name) => name === 'fb_consent' ? [cookieAt(NOW + 2 * DAY)] : []);
+    runCode({siteId: 'my-site', waitForUpdate: 500, restoreFromCookie: true});
+    assertApi('updateConsentState').wasNotCalled();
+- name: A saved choice dated less than a day in the future is applied
+  code: |-
+    mock('getCookieValues', (name) => name === 'fb_consent' ? [cookieAt(NOW + DAY / 2)] : []);
+    runCode({siteId: 'my-site', waitForUpdate: 500, restoreFromCookie: true});
+    assertApi('updateConsentState').wasCalledWith(SAVED_STATE);
+- name: A saved choice within a custom consent lifetime is applied
+  code: |-
+    mock('getCookieValues', (name) => name === 'fb_consent' ? [cookieAt(NOW - 20 * DAY)] : []);
+    runCode({siteId: 'my-site', waitForUpdate: 500, restoreFromCookie: true, consentMaxAgeDays: 30});
+    assertApi('updateConsentState').wasCalledWith(SAVED_STATE);
+- name: Consent lifetime does not matter when cookie restore is off
+  code: |-
+    mock('getCookieValues', (name) => name === 'fb_consent' ? [cookieAt(NOW - 20 * DAY)] : []);
+    runCode({siteId: 'my-site', waitForUpdate: 500, restoreFromCookie: false, consentMaxAgeDays: 30});
+    assertApi('getCookieValues').wasNotCalled();
+    assertApi('updateConsentState').wasNotCalled();
+    assertApi('injectScript').wasCalled();
 - name: Widget unavailable - gtmOnFailure, no event
   code: |-
     mock('injectScript', (url, onSuccess, onFailure) => { onFailure(); });
@@ -1158,7 +1260,10 @@ scenarios:
     assertApi('setDefaultConsentState').wasNotCalledWith({region: ['US'], analytics_storage: 'granted', ad_storage: 'denied', security_storage: 'denied', wait_for_update: 500});
 setup: |-
   const getType = require('getType');
-  const SAVED_COOKIE = '{"v":1,"k":"analytics,marketing,necessary","id":"x","ts":1,"c":{"necessary":true,"analytics":true,"marketing":false}}';
+  const DAY = 86400000;
+  const NOW = 1767225600000;
+  const cookieAt = (ts) => '{"v":1,"k":"analytics,marketing,necessary","id":"x","ts":' + ts + ',"c":{"necessary":true,"analytics":true,"marketing":false}}';
+  const SAVED_COOKIE = cookieAt(NOW - 10 * DAY);
   const SAVED_STATE = {
     analytics_storage: 'granted', ad_storage: 'denied', ad_user_data: 'denied',
     ad_personalization: 'denied', functionality_storage: 'denied', personalization_storage: 'denied'
@@ -1178,6 +1283,7 @@ setup: |-
   let widgetSource = null;
   mock('injectScript', (url, onSuccess, onFailure) => { onSuccess(); });
   mock('getCookieValues', () => []);
+  mock('getTimestampMillis', () => NOW);
   mock('copyFromWindow', () => undefined);
   mock('callInWindow', (path, eventName, fn) => {
     if (path === 'FrostBanner.on') { handlers[eventName] = fn; return; }
