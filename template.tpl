@@ -147,7 +147,7 @@ ___TEMPLATE_PARAMETERS___
         "checkboxText": "Push a frostbanner_consent_update event to the data layer",
         "simpleValueType": true,
         "defaultValue": true,
-        "help": "Pushed each time the FrostBanner widget confirms a choice. Use it as a Custom Event trigger. The data layer gets frostbanner.analytics, frostbanner.marketing and frostbanner.functional (true or false) and frostbanner.source: restore (saved choice confirmed), accept_all, reject_all, custom (banner) or outside_region."
+        "help": "Pushed each time the FrostBanner widget confirms a choice. Use it as a Custom Event trigger. The data layer gets frostbanner.analytics, frostbanner.marketing and frostbanner.functional (true or false) and frostbanner.source: restore (saved choice confirmed), accept_all, reject_all, custom (banner), outside_region or withdrawn (a choice made before the widget started is withdrawn)."
       },
       {
         "type": "CHECKBOX",
@@ -362,7 +362,7 @@ if (!siteId || !SITE_ID_REGEX || !testRegex(SITE_ID_REGEX, siteId)) {
   // 4. Load the widget, then follow what it reports.
   injectScript(SCRIPT_URL, () => {
     // change: { choices, source } - a choice applied by the widget
-    // (restore, outside_region, accept_all, reject_all, custom).
+    // (restore, outside_region, accept_all, reject_all, custom, withdrawn).
     callInWindow('FrostBanner.on', 'change', (event) => {
       if (getType(event) !== 'object' || getType(event.choices) !== 'object') return;
       const source = getType(event.source) === 'string' ? event.source : 'unknown';

@@ -19,7 +19,7 @@ The template:
    - Set the same value as the consent lifetime (`maxAgeDays`) in your FrostBanner settings. With a longer value in the template, a choice the widget already treats as expired is applied until the widget asks again. With a shorter value, returning visitors start denied until the widget confirms their choice.
    - Changed categories and a raised `consentVersion` are checked by the widget only, not by the template. In that case the saved choice is applied until the widget loads, then the widget shows the banner again (`shown`) and consent goes back to denied. Google tags that fire before that (for example on Initialization or the first page view) can still use the old choice. If that is not acceptable for you, switch off **Apply a returning visitor's saved choice immediately**.
 3. The widget loads and reports:
-   - `change` — a choice is applied. The template updates consent and pushes `frostbanner_consent_update` with the widget's `source`: `restore` (saved choice confirmed), `accept_all`, `reject_all`, `custom` (banner) or `outside_region`;
+   - `change` — a choice is applied. The template updates consent and pushes `frostbanner_consent_update` with the widget's `source`: `restore` (saved choice confirmed), `accept_all`, `reject_all`, `custom` (banner), `outside_region` or `withdrawn` (a choice made before the widget started is withdrawn);
    - `shown` — the banner asks the visitor. If a saved choice was applied in step 2, consent goes back to denied until the visitor chooses.
 
    The widget can start while its script is still running (cached settings, page already parsed), before the template has subscribed to these events. So right after the script loads the template also reads `FrostBanner.getStatus()`:
@@ -52,7 +52,7 @@ Full guide: <https://frostbanner.com/guides/google-tag-manager/>
 | Wait for update | Milliseconds Google tags wait for the visitor's choice. Default 500. |
 | Apply a returning visitor's saved choice immediately | Reads the `fb_consent` cookie. On by default. Set back to denied if the banner asks again. |
 | Consent lifetime, days | A saved choice older than this is not applied. Default 180. Must match the consent lifetime (`maxAgeDays`) in your FrostBanner settings. |
-| Push a `frostbanner_consent_update` event | Data layer event each time the widget confirms a choice, with `frostbanner.analytics`, `frostbanner.marketing`, `frostbanner.functional` (true/false) and `frostbanner.source` (`restore`, `accept_all`, `reject_all`, `custom`, `outside_region`). Never pushed from the cookie alone. On by default. |
+| Push a `frostbanner_consent_update` event | Data layer event each time the widget confirms a choice, with `frostbanner.analytics`, `frostbanner.marketing`, `frostbanner.functional` (true/false) and `frostbanner.source` (`restore`, `accept_all`, `reject_all`, `custom`, `outside_region`, `withdrawn`). Never pushed from the cookie alone. On by default. |
 | `ads_data_redaction`, `url_passthrough` | Optional Google settings. Off by default. |
 
 ## How FrostBanner categories map to Google consent types
