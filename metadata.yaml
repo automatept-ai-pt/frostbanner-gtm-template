@@ -1,5 +1,12 @@
 homepage: "https://frostbanner.com"
 documentation: "https://frostbanner.com/guides/google-tag-manager/"
 versions:
+  - sha: cbcf825406428b10d4483fc1f64e658f1bf07172
+    changeNotes: |-
+      Version 0.5.0. Works with the widget in GTM mode and follows its change and shown events.
+      Site ID check rewritten without createRegex/testRegex (not available in web templates).
+      Data layer source "withdrawn" for a withdrawn choice made before the widget started.
+      Saved cookie choice: older or undated records are not applied; reverted to denied if the widget has no getStatus.
+      New field "Consent lifetime, days" (default 180, match maxAgeDays in FrostBanner).
   - sha: 10c3eca4ed8c15b9c50085d038f490ae88418486
     changeNotes: Initial release.
